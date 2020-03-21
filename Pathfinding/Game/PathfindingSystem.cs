@@ -9,15 +9,22 @@ using Unity.Mathematics;
 using Unity.Transforms;
 using UnityEngine;
 
+[AlwaysUpdateSystem]
 public class PathfindingSystem : ComponentSystem
 {
     private const int HEURISTIC_BIAS = 1;
+    private const int MAX_JOBS_PER_FRAME = 8;
+    private const int JOB_BATCH_SIZE = 2;
 
     private PathfindingGraph graph;
 
-    private NativeList<Entity> entities = new NativeList<Entity>( Allocator.Persistent );
-    private NativeList<float2> startPositions = new NativeList<float2>( Allocator.Persistent );
-    private NativeList<float2> endPositions = new NativeList<float2>( Allocator.Persistent );
+    private NativeList<Entity> jobEntities = new NativeList<Entity>( Allocator.Persistent );
+    private NativeList<float2> jobStartPositions = new NativeList<float2>( Allocator.Persistent );
+    private NativeList<float2> jobEndPositions = new NativeList<float2>( Allocator.Persistent );
+
+    private Queue<Entity> entityQueue = new Queue<Entity>();
+    private Queue<float2> startPositionQueue = new Queue<float2>();
+    private Queue<float2> endPositionQueue = new Queue<float2>();
 
     private Stopwatch sw;
     private bool showMarkers = true;
@@ -35,22 +42,38 @@ public class PathfindingSystem : ComponentSystem
 
         bool showTime = false;
 
-        entities.Clear();
-        startPositions.Clear();
-        endPositions.Clear();
+        jobEntities.Clear();
+        jobStartPositions.Clear();
+        jobEndPositions.Clear();
 
         Entities.ForEach( ( Entity entity , ref PathFinding_Orders pathFindingOrders , ref Translation translation ) =>
         {
-            entities.Add( entity );
-            startPositions.Add( new float2( translation.Value.x , translation.Value.z ) );
-            endPositions.Add( pathFindingOrders.targetPosition );
+            entityQueue.Enqueue( entity );
+            startPositionQueue.Enqueue( new float2( translation.Value.x , translation.Value.z ) );
+            endPositionQueue.Enqueue( pathFindingOrders.targetPosition );
 
             PostUpdateCommands.RemoveComponent<PathFinding_Orders>( entity );
         } );
 
-        if ( entities.Length > 0 )
+        int numEntitiesWaiting = entityQueue.Count;
+        if ( numEntitiesWaiting > 0 )
         {
+            int numJobs = MAX_JOBS_PER_FRAME;
+            if ( numEntitiesWaiting < 4 )
+                numJobs = numEntitiesWaiting;
+
             showTime = true;
+
+            jobEntities.Clear();
+            jobStartPositions.Clear();
+            jobEndPositions.Clear();
+
+            for ( int i = 0; i < numJobs; i++ )
+            {
+                jobEntities.Add( entityQueue.Dequeue() );
+                jobStartPositions.Add( startPositionQueue.Dequeue() );
+                jobEndPositions.Add( endPositionQueue.Dequeue() );
+            }
 
             FindPathJob job = new FindPathJob
             {
@@ -76,22 +99,21 @@ public class PathfindingSystem : ComponentSystem
                 graphNodePositions = graph.nodePositions ,
                 graphNodeWalkables = graph.nodeWalkables ,
                 // ENTITY DATA
-                startWorldPositions = startPositions.AsArray() ,
-                endWorldPositions = endPositions.AsArray() ,
-                entities = entities.AsArray() ,
+                entities = jobEntities.AsArray() ,
+                startWorldPositions = jobStartPositions.AsArray() ,
+                endWorldPositions = jobEndPositions.AsArray() ,
                 // WRITABLE ENTITY DATA
                 pathPositionBuffer = GetBufferFromEntity<Path_Position>() ,
                 pathIndexComponentData = GetComponentDataFromEntity<Path_Index>()
             };
 
-            int batchSize = 1;
-            JobHandle jobHandle = job.Schedule( entities.Length , batchSize );
+            JobHandle jobHandle = job.Schedule( numJobs , JOB_BATCH_SIZE );
             jobHandle.Complete();
 
             sw.Stop();
             if ( showTime )
-              UnityEngine.Debug.Log( sw.Elapsed );
-
+                UnityEngine.Debug.Log( sw.Elapsed );
+        }
             /*if ( showMarkers )
             {
                 BufferFromEntity<Path_Position> pathPositionBuffer = GetBufferFromEntity<Path_Position>();
@@ -109,13 +131,13 @@ public class PathfindingSystem : ComponentSystem
                     }
                 } );
             }*/
-        }
+        //}
     }
     protected override void OnDestroy()
     {
-        entities.Dispose();
-        startPositions.Dispose();
-        endPositions.Dispose();
+        jobEntities.Dispose();
+        jobStartPositions.Dispose();
+        jobEndPositions.Dispose();
         base.OnDestroy();
     }
 
@@ -420,10 +442,10 @@ public class PathfindingSystem : ComponentSystem
 
                 while ( parentArray[ nodeIndex ] != -1 )
                 {
-                    //aStarPath.Add( graphNodePositions[ graphIndexArray[ parentArray[ nodeIndex ] ] ] );
-                    waypoints.Add( new float2(
+                    aStarPath.Add( graphNodePositions[ graphIndexArray[ parentArray[ nodeIndex ] ] ] );
+                    /*waypoints.Add( new float2(
                         graphNodePositions[ graphIndexArray[ parentArray[ nodeIndex ] ] ].x * graphCellSize ,
-                        graphNodePositions[ graphIndexArray[ parentArray[ nodeIndex ] ] ].y * graphCellSize ) );
+                        graphNodePositions[ graphIndexArray[ parentArray[ nodeIndex ] ] ].y * graphCellSize ) );*/
                     nodeIndex = parentArray[ nodeIndex ];
                 }
             }
@@ -431,7 +453,7 @@ public class PathfindingSystem : ComponentSystem
             #endregion
             #region SMOOTH PATH
 
-            /*if ( aStarPath.Length > 2 ) // If its less than or equal 2 theres no need to smooth the path
+            if ( aStarPath.Length > 2 ) // If its less than or equal 2 theres no need to smooth the path
             {
                 int fromIndex = 0;
                 bool foundPath = false;
@@ -454,8 +476,8 @@ public class PathfindingSystem : ComponentSystem
                         if ( !LOSBetween2Nodes( start , end ) )
                         {
                             float2 worldPosition = new float2(
-                                graphNodePositions[ graphNodeArrayIndex ].x * graphCellLength ,
-                                graphNodePositions[ graphNodeArrayIndex ].y * graphCellLength );
+                                graphNodePositions[ graphNodeArrayIndex ].x * graphCellSize ,
+                                graphNodePositions[ graphNodeArrayIndex ].y * graphCellSize );
 
                             waypoints.Add( worldPosition );
                             fromIndex = stopIndex;
@@ -472,7 +494,7 @@ public class PathfindingSystem : ComponentSystem
                         }
                     }
                 }
-            }*/
+            }
 
             #endregion
             #region RETURN
@@ -685,7 +707,18 @@ public class PathfindingSystem : ComponentSystem
             {
                 walkable += graphNodeWalkables[ pos.x + pos.y * graphCellLength ];
 
-                if ( numSameDir < 1 )
+                if ( error > 0 ) // more steps in x
+                {
+                    pos.x += inc.x;
+                    error -= dif.y;
+                }
+                else // more steps in y
+                {
+                    pos.y += inc.y;
+                    error += dif.x;
+                }
+
+                /*if ( numSameDir < 1 )
                 {
                     if ( prevY )
                         walkable += graphNodeWalkables[ ( pos.x - inc.x ) + pos.y * graphCellLength ];
@@ -716,7 +749,7 @@ public class PathfindingSystem : ComponentSystem
                         prevY = true;
                         error += dif.x;
                     }
-                }
+                }*/
             }
 
             return walkable == 0;
