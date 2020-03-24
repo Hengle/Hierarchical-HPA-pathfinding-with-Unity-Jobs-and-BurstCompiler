@@ -15,6 +15,7 @@ public class PathfindingGraph
 
     // CLUSTER
     public NativeArray<int2> clusterEdges;
+    public NativeArray<Blittable_Bool> clusterDense;
     public NativeArray<int> intraEdges; // EdgeLength
     public NativeArray<int> interEdges; // EdgeLength
     // EDGE
@@ -22,7 +23,7 @@ public class PathfindingGraph
     public NativeArray<int2> pathKeysPerEdge; // NodeLength
     public NativeArray<int> edgeNeighbours;
     public NativeArray<int2> edgePaths;
-    public NativeArray<float2> edgePathPositions;
+    public NativeArray<int2> edgePathPositions;
     // NODE
     public NativeArray<int> nodeToEdge; // NodeLength
     public NativeArray<int2> nodePositions; // NodeLength
@@ -87,6 +88,7 @@ public class PathfindingGraph
     public void Dispose()
     {
         clusterEdges.Dispose();
+        clusterDense.Dispose();
         intraEdges.Dispose();
         interEdges.Dispose();
         edgeNeighbourKeys.Dispose();
@@ -141,12 +143,19 @@ public class PathfindingGraph
         // Temporary lists for variable-sized 2d -> 1d arrays
         NativeList<int> tempEdgeNeighbours = new NativeList<int>( Allocator.TempJob );
         NativeList<int2> tempEdgePaths = new NativeList<int2>( Allocator.TempJob );
-        NativeList<float2> tempEdgePathPositions = new NativeList<float2>( Allocator.TempJob );
+        NativeList<int2> tempEdgePathPositions = new NativeList<int2>( Allocator.TempJob );
         NativeList<int> tempClusterEdges = new NativeList<int>( Allocator.TempJob );
         NativeList<int> tempInterEdges = new NativeList<int>( Allocator.TempJob );
 
         // Initialize structured arrays
         clusterEdges = new NativeArray<int2>( numClustersAcross * numClustersAcross , Allocator.Persistent );
+        clusterDense = new NativeArray<Blittable_Bool>( numClustersAcross * numClustersAcross , Allocator.Persistent );
+
+        for ( int i = 0; i < clusterDense.Length; i++ )
+        {
+            clusterDense[ i ] = false;
+        }
+
         edgeNeighbourKeys = new NativeArray<int2>( nodePositions.Length , Allocator.Persistent );
         pathKeysPerEdge = new NativeArray<int2>( nodePositions.Length , Allocator.Persistent );
         nodeToEdge = new NativeArray<int>( nodePositions.Length , Allocator.Persistent );
@@ -217,10 +226,10 @@ public class PathfindingGraph
                         clusterPosition = new int2( clusterCol , clusterRow ) ,
                         nodePositions = nodePositions ,
                         nodeWalkables = nodeWalkables ,
-                        path = new NativeList<float2>( Allocator.TempJob )
+                        path = new NativeList<int2>( Allocator.TempJob )
                     };
                     job.Run();
-                    NativeList<float2> path = job.path;
+                    NativeList<int2> path = job.path;
 
                     // if we have a path
                     if ( path.Length > 0 )
@@ -245,7 +254,7 @@ public class PathfindingGraph
 
         edgeNeighbours = new NativeArray<int>( tempEdgeNeighbours.ToArray() , Allocator.Persistent );
         edgePaths = new NativeArray<int2>( tempEdgePaths.ToArray() , Allocator.Persistent );
-        edgePathPositions = new NativeArray<float2>( tempEdgePathPositions.ToArray() , Allocator.Persistent );
+        edgePathPositions = new NativeArray<int2>( tempEdgePathPositions.ToArray() , Allocator.Persistent );
         intraEdges = new NativeArray<int>( tempClusterEdges.ToArray() , Allocator.Persistent );
         interEdges = new NativeArray<int>( tempInterEdges.ToArray() , Allocator.Persistent );
 
@@ -465,7 +474,7 @@ public class PathfindingGraph
         [ReadOnly] public NativeArray<int2> nodePositions;
         [ReadOnly] public NativeArray<byte> nodeWalkables;
 
-        public NativeList<float2> path;
+        public NativeList<int2> path;
 
         public void Execute()
         {
@@ -585,10 +594,10 @@ public class PathfindingGraph
                 }
             }
 
-            NativeList<int2> aStarPath = new NativeList<int2>( Allocator.Temp );
-            NativeList<float2> waypoints = new NativeList<float2>( Allocator.Temp );
+            NativeList<int2> pathFound = new NativeList<int2>( Allocator.Temp );
+            NativeList<int2> smoothedPath = new NativeList<int2>( Allocator.Temp );
             int nodeIndex = endNodeIndex;
-            bool smoothPath = false;
+            bool smoothPath = true;
 
             if ( parentArray[ nodeIndex ] == -1 )
             {
@@ -601,49 +610,27 @@ public class PathfindingGraph
                 fCostArray.Dispose();
                 openArray.Dispose();
                 closedArray.Dispose();
-                aStarPath.Dispose();
-                waypoints.Dispose();
+                pathFound.Dispose();
+                smoothedPath.Dispose();
 
-                path = new NativeList<float2>( Allocator.Temp );
+                path = new NativeList<int2>( Allocator.Temp );
             }
             else
             {
-                //tracePath = true;
-
-                waypoints.Add(new int2(
-                    endPosition.x * cellSize ,
-                    endPosition.y * cellSize ));
-                aStarPath.Add( endPosition );
+                pathFound.Add( endPosition );
+                smoothedPath.Add( endPosition );
 
                 while ( parentArray[ nodeIndex ] != -1 )
                 {
-                    aStarPath.Add( nodePositions[ graphIndexArray[ parentArray[ nodeIndex ] ] ] );
-                    waypoints.Add( new int2(
+                    pathFound.Add( nodePositions[ graphIndexArray[ parentArray[ nodeIndex ] ] ] );
+                    /*waypoints.Add( new int2(
                         nodePositions[ graphIndexArray[ parentArray[ nodeIndex ] ] ].x * cellSize ,
-                        nodePositions[ graphIndexArray[ parentArray[ nodeIndex ] ] ].y * cellSize ) );
+                        nodePositions[ graphIndexArray[ parentArray[ nodeIndex ] ] ].y * cellSize ) );*/
                     nodeIndex = parentArray[ nodeIndex ];
                 }
-
-                openSet.Dispose();
-                localIndexArray.Dispose();
-                graphIndexArray.Dispose();
-                parentArray.Dispose();
-                hCostArray.Dispose();
-                gCostArray.Dispose();
-                fCostArray.Dispose();
-                openArray.Dispose();
-                closedArray.Dispose();
-                aStarPath.Dispose();
-
-                for ( int i = 0; i < waypoints.Length; i++ )
-                {
-                    path.Add( waypoints[ i ] );
-                }
-
-                waypoints.Dispose();
             }
 
-            if ( smoothPath && aStarPath.Length > 2 ) // If its less than or equal 2 theres no need to smooth the path
+            if ( smoothPath && pathFound.Length > 2 ) // If its less than or equal 2 theres no need to smooth the path
             {
                 int fromIndex = 0;
                 bool foundPath = false;
@@ -652,30 +639,30 @@ public class PathfindingGraph
                 {
                     int currentIndex = fromIndex + 2; // Because the next index is always going to be in line of sight
 
-                    if ( currentIndex > aStarPath.Length - 1 )
+                    if ( currentIndex > pathFound.Length - 1 )
                         break;
 
                     while ( true )
                     {
                         int stopIndex = currentIndex - 1;
-                        int graphNodeArrayIndex = aStarPath[ stopIndex ].x + aStarPath[ stopIndex ].y * numCells;
+                        int graphNodeArrayIndex = pathFound[ stopIndex ].x + pathFound[ stopIndex ].y * numCells;
 
-                        int2 start = aStarPath[ fromIndex ];
-                        int2 end = aStarPath[ currentIndex ];
+                        int2 start = pathFound[ fromIndex ];
+                        int2 end = pathFound[ currentIndex ];
 
                         if ( !LOS( start.x , start.y , end.x , end.y ) )
                         {
-                            float2 worldPosition = new float2(
+                            /*float2 worldPosition = new float2(
                                 nodePositions[ graphNodeArrayIndex ].x * cellSize ,
-                                nodePositions[ graphNodeArrayIndex ].y * cellSize );
+                                nodePositions[ graphNodeArrayIndex ].y * cellSize );*/
 
-                            waypoints.Add( worldPosition );
+                            smoothedPath.Add( nodePositions[ graphNodeArrayIndex ] );
                             fromIndex = stopIndex;
                             break;
                         }
                         else
                         {
-                            if ( currentIndex >= aStarPath.Length - 1 )
+                            if ( currentIndex >= pathFound.Length - 1 )
                             {
                                 foundPath = true;
                                 break;
@@ -686,7 +673,7 @@ public class PathfindingGraph
                 }
             }
 
-            /*openSet.Dispose();
+            openSet.Dispose();
             localIndexArray.Dispose();
             graphIndexArray.Dispose();
             parentArray.Dispose();
@@ -695,11 +682,11 @@ public class PathfindingGraph
             fCostArray.Dispose();
             openArray.Dispose();
             closedArray.Dispose();
-            aStarPath.Dispose();
+            pathFound.Dispose();
 
-            path = waypoints;
+            path = smoothedPath;
 
-            waypoints.Dispose();*/
+            smoothedPath.Dispose();
         }
 
         private bool LOS( int x1 , int y1 , int x2 , int y2 )
@@ -730,7 +717,7 @@ public class PathfindingGraph
             {
                 walkable += nodeWalkables[ x + y * numCells ];
 
-                if ( numSameDir < 1 )
+                /*if ( numSameDir < 1 )
                 {
                     if ( prevY )
                     {
@@ -741,38 +728,38 @@ public class PathfindingGraph
                     {
                         walkable += nodeWalkables[ x + ( y - yInc ) * numCells ];
                     }
-                }
+                }*/
 
                 if ( error > 0 ) // more steps in x
                 {
                     x += xInc;
 
-                    if ( !prevY )
+                    /*if ( !prevY )
                     {
                         numSameDir++;
                     }
                     else
                     {
                         numSameDir = 0;
-                    }
+                    }*/
 
-                    prevY = false;
+                    //prevY = false;
                     error -= dy;
                 }
                 else // more steps in y
                 {
                     y += yInc;
 
-                    if ( prevY )
+                    /*if ( prevY )
                     {
                         numSameDir++;
                     }
                     else
                     {
                         numSameDir = 0;
-                    }
+                    }*/
 
-                    prevY = true;
+                    //prevY = true;
                     error += dx;
                 }
             }

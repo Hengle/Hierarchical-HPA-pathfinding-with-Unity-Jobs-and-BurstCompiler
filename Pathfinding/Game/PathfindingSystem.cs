@@ -7,7 +7,6 @@ using Unity.Entities;
 using Unity.Jobs;
 using Unity.Mathematics;
 using Unity.Transforms;
-using UnityEngine;
 
 [AlwaysUpdateSystem]
 public class PathfindingSystem : ComponentSystem
@@ -46,20 +45,20 @@ public class PathfindingSystem : ComponentSystem
         jobStartPositions.Clear();
         jobEndPositions.Clear();
 
-        Entities.ForEach( ( Entity entity , ref PathFinding_Orders pathFindingOrders , ref Translation translation ) =>
+        Entities.ForEach( ( Entity entity , ref PathFindingOrders pathFindingOrders , ref Translation translation ) =>
         {
             entityQueue.Enqueue( entity );
             startPositionQueue.Enqueue( new float2( translation.Value.x , translation.Value.z ) );
             endPositionQueue.Enqueue( pathFindingOrders.targetPosition );
 
-            PostUpdateCommands.RemoveComponent<PathFinding_Orders>( entity );
+            PostUpdateCommands.RemoveComponent<PathFindingOrders>( entity );
         } );
 
         int numEntitiesWaiting = entityQueue.Count;
         if ( numEntitiesWaiting > 0 )
         {
             int numJobs = MAX_JOBS_PER_FRAME;
-            if ( numEntitiesWaiting < 4 )
+            if ( numEntitiesWaiting < MAX_JOBS_PER_FRAME )
                 numJobs = numEntitiesWaiting;
 
             showTime = true;
@@ -103,8 +102,8 @@ public class PathfindingSystem : ComponentSystem
                 startWorldPositions = jobStartPositions.AsArray() ,
                 endWorldPositions = jobEndPositions.AsArray() ,
                 // WRITABLE ENTITY DATA
-                pathPositionBuffer = GetBufferFromEntity<Path_Position>() ,
-                pathIndexComponentData = GetComponentDataFromEntity<Path_Index>()
+                pathPositionBuffer = GetBufferFromEntity<PathPosition>() ,
+                pathIndexComponentData = GetComponentDataFromEntity<PathIndex>()
             };
 
             JobHandle jobHandle = job.Schedule( numJobs , JOB_BATCH_SIZE );
@@ -159,7 +158,7 @@ public class PathfindingSystem : ComponentSystem
         [ReadOnly] public NativeArray<int> graphEdgeNeighbours;
         [ReadOnly] public NativeArray<int2> graphEdgePathList; // NodeLength
         [ReadOnly] public NativeArray<int2> graphEdgePaths;
-        [ReadOnly] public NativeArray<float2> graphEdgePathPositions;
+        [ReadOnly] public NativeArray<int2> graphEdgePathPositions;
         // NODE
         [ReadOnly] public NativeArray<int2> neighbourOffsetArray;
         [ReadOnly] public NativeArray<int> graphNodeToEdge; // NodeLength
@@ -170,15 +169,15 @@ public class PathfindingSystem : ComponentSystem
         [ReadOnly] public NativeArray<float2> endWorldPositions;
         [ReadOnly] public NativeArray<Entity> entities;
         // Entity Data To Write To
-        [NativeDisableContainerSafetyRestriction] public BufferFromEntity<Path_Position> pathPositionBuffer;
-        [NativeDisableContainerSafetyRestriction] public ComponentDataFromEntity<Path_Index> pathIndexComponentData;
+        [NativeDisableContainerSafetyRestriction] public BufferFromEntity<PathPosition> pathPositionBuffer;
+        [NativeDisableContainerSafetyRestriction] public ComponentDataFromEntity<PathIndex> pathIndexComponentData;
 
         public void Execute( int jobIndex )
         {
             // Get the current entity
             Entity entity = entities[ jobIndex ];
             pathPositionBuffer[ entity ].Clear();
-            pathIndexComponentData[ entity ] = new Path_Index { index = -1 };
+            pathIndexComponentData[ entity ] = new PathIndex { index = -1 };
 
             // Get grid positions from world positions (float2 -> int2)
             float2 startGridPositionAsFloat = new float2( 
@@ -217,38 +216,45 @@ public class PathfindingSystem : ComponentSystem
                 // If there are no paths from start position to any of the edges in current cluster, break out
                 if ( startEdges.Length == 0 )
                 {
-                    pathIndexComponentData[ entity ] = new Path_Index { index = -1 };
+                    pathIndexComponentData[ entity ] = new PathIndex { index = -1 };
                     startEdges.Dispose();
                     return;
                 }
                 else
                 {
-                    NativeList<float2> highLevelPath = FindHighLevelPathInGraph( startEdges , startGridPosition , endGridPosition );
+                    NativeList<int2> highLevelPath = FindHighLevelPathInGraph( startEdges , startGridPosition , endGridPosition );
 
                     if ( highLevelPath.Length > 0 )
                     {
                         int2 endOfHLPath = new int2(
-                            ( int ) highLevelPath[ 0 ].x / graphCellSize ,
-                            ( int ) highLevelPath[ 0 ].y / graphCellSize );
+                            highLevelPath[ 0 ].x ,
+                            highLevelPath[ 0 ].y );
                         int2 beginningOfHLPath = new int2(
-                            ( int ) highLevelPath[ highLevelPath.Length - 1 ].x / graphCellSize ,
-                            ( int ) highLevelPath[ highLevelPath.Length - 1 ].y / graphCellSize );
+                            highLevelPath[ highLevelPath.Length - 1 ].x ,
+                            highLevelPath[ highLevelPath.Length - 1 ].y );
 
-                        NativeList<float2> finalPath =
+                        NativeList<int2> finalPath =
                             FindLowLevelPathInCluster( endOfHLPath , endGridPosition , endClusterPosition );
-                        NativeList<float2> pathToHLPath =
+                        NativeList<int2> pathToHLPath =
                             FindLowLevelPathInCluster( startGridPosition , beginningOfHLPath , startClusterPosition );
 
                         for ( int i = 0; i < highLevelPath.Length; i++ )
                             finalPath.Add( highLevelPath[ i ] );
                         for ( int i = 0; i < pathToHLPath.Length; i++ )
                             finalPath.Add( pathToHLPath[ i ] );
-                        // Write final path to entity buffer
-                        for ( int i = 0; i < finalPath.Length; i++ )
-                            pathPositionBuffer[ entity ].Add( new Path_Position { position = finalPath[ i ] } );
 
+                        // Write final path to entity buffer
+                        float2 pathPosition = new float2( 0 , 0 );
+                        for ( int i = 0; i < finalPath.Length; i++ )
+                        {
+                            pathPosition = new float2(
+                                finalPath[ i ].x * graphCellSize ,
+                                finalPath[ i ].y * graphCellSize );
+                            pathPositionBuffer[ entity ].Add( 
+                                new PathPosition { position = pathPosition } );
+                        }
                         pathIndexComponentData[ entity ] =
-                            new Path_Index { index = pathPositionBuffer[ entity ].Length - 1 };
+                            new PathIndex { index = pathPositionBuffer[ entity ].Length - 1 };
 
                         finalPath.Dispose();
                         pathToHLPath.Dispose();
@@ -258,7 +264,7 @@ public class PathfindingSystem : ComponentSystem
                     }
                     else
                     {
-                        pathIndexComponentData[ entity ] = new Path_Index { index = -1 };
+                        pathIndexComponentData[ entity ] = new PathIndex { index = -1 };
                         startEdges.Dispose();
                         highLevelPath.Dispose();
                         return;
@@ -267,21 +273,27 @@ public class PathfindingSystem : ComponentSystem
             }
             else // OTHERWISE, the start and end positions are in the same cluster, so just do a quick low-level a* search
             {
-                NativeList<float2> path = 
+                NativeList<int2> path = 
                     FindLowLevelPathInCluster( startGridPosition , endGridPosition , startClusterPosition );
 
                 if ( path.Length > 0 )
                 {
+                    float2 pathPosition = new float2( 0 , 0 );
                     for ( int i = 0; i < path.Length; i++ )
-                        pathPositionBuffer[ entity ].Add( new Path_Position { position = path[ i ] } );
-
+                    {
+                        pathPosition = new float2(
+                            path[ i ].x * graphCellSize ,
+                            path[ i ].y * graphCellSize );
+                        pathPositionBuffer[ entity ].Add( 
+                            new PathPosition { position = pathPosition } );
+                    }
                     pathIndexComponentData[ entity ] = 
-                        new Path_Index { index = pathPositionBuffer[ entity ].Length - 1 };
+                        new PathIndex { index = pathPositionBuffer[ entity ].Length - 1 };
                 }
                 else
                 {
                     pathIndexComponentData[ entity ] = 
-                        new Path_Index { index = -1 };
+                        new PathIndex { index = -1 };
                 }
 
                 path.Dispose();
@@ -289,7 +301,7 @@ public class PathfindingSystem : ComponentSystem
             }
         }
 
-        private NativeList<float2> FindLowLevelPathInCluster( int2 startPosition , int2 endPosition , int2 clusterPosition )
+        private NativeList<int2> FindLowLevelPathInCluster( int2 startPosition , int2 endPosition , int2 clusterPosition )
         {
             #region DATA SETUP
 
@@ -415,8 +427,8 @@ public class PathfindingSystem : ComponentSystem
             #endregion
             #region TRACE PATH
 
-            NativeList<int2> aStarPath = new NativeList<int2>( Allocator.Temp );
-            NativeList<float2> waypoints = new NativeList<float2>( Allocator.Temp );
+            NativeList<int2> path = new NativeList<int2>( Allocator.Temp );
+            NativeList<int2> smoothedPath = new NativeList<int2>( Allocator.Temp );
             int nodeIndex = endNodeIndex;
 
             if ( parentArray[ endNodeIndex ] == -1 )
@@ -430,19 +442,19 @@ public class PathfindingSystem : ComponentSystem
                 fCostArray.Dispose();
                 openArray.Dispose();
                 closedArray.Dispose();
-                aStarPath.Dispose();
-                return waypoints;
+                return path;
             }
             else
             {
-                waypoints.Add( new float2(
+                /*waypoints.Add( new float2(
                     endPosition.x * graphCellSize ,
-                    endPosition.y * graphCellSize ) );
-                aStarPath.Add( endPosition );
+                    endPosition.y * graphCellSize ) );*/
+                smoothedPath.Add( endPosition );
+                path.Add( endPosition );
 
                 while ( parentArray[ nodeIndex ] != -1 )
                 {
-                    aStarPath.Add( graphNodePositions[ graphIndexArray[ parentArray[ nodeIndex ] ] ] );
+                    path.Add( graphNodePositions[ graphIndexArray[ parentArray[ nodeIndex ] ] ] );
                     /*waypoints.Add( new float2(
                         graphNodePositions[ graphIndexArray[ parentArray[ nodeIndex ] ] ].x * graphCellSize ,
                         graphNodePositions[ graphIndexArray[ parentArray[ nodeIndex ] ] ].y * graphCellSize ) );*/
@@ -453,7 +465,7 @@ public class PathfindingSystem : ComponentSystem
             #endregion
             #region SMOOTH PATH
 
-            if ( aStarPath.Length > 2 ) // If its less than or equal 2 theres no need to smooth the path
+            if ( path.Length > 2 ) // If its less than or equal 2 theres no need to smooth the path
             {
                 int fromIndex = 0;
                 bool foundPath = false;
@@ -462,30 +474,30 @@ public class PathfindingSystem : ComponentSystem
                 {
                     int currentIndex = fromIndex + 2; // Because the next index is always going to be in line of sight
 
-                    if ( currentIndex > aStarPath.Length - 1 )
+                    if ( currentIndex > path.Length - 1 )
                         break;
 
                     while ( true )
                     {
                         int stopIndex = currentIndex - 1;
-                        int graphNodeArrayIndex = aStarPath[ stopIndex ].x + aStarPath[ stopIndex ].y * graphCellLength;
+                        int graphNodeArrayIndex = path[ stopIndex ].x + path[ stopIndex ].y * graphCellLength;
 
-                        int2 start = aStarPath[ fromIndex ];
-                        int2 end = aStarPath[ currentIndex ];
+                        int2 start = path[ fromIndex ];
+                        int2 end = path[ currentIndex ];
 
                         if ( !LOSBetween2Nodes( start , end ) )
                         {
-                            float2 worldPosition = new float2(
+                            /*float2 worldPosition = new float2(
                                 graphNodePositions[ graphNodeArrayIndex ].x * graphCellSize ,
-                                graphNodePositions[ graphNodeArrayIndex ].y * graphCellSize );
+                                graphNodePositions[ graphNodeArrayIndex ].y * graphCellSize );*/
 
-                            waypoints.Add( worldPosition );
+                            smoothedPath.Add( graphNodePositions[ graphNodeArrayIndex ] );
                             fromIndex = stopIndex;
                             break;
                         }
                         else
                         {
-                            if ( currentIndex >= aStarPath.Length - 1 )
+                            if ( currentIndex >= path.Length - 1 )
                             {
                                 foundPath = true;
                                 break;
@@ -508,12 +520,12 @@ public class PathfindingSystem : ComponentSystem
             fCostArray.Dispose();
             openArray.Dispose();
             closedArray.Dispose();
-            aStarPath.Dispose();
-            return waypoints;
+            path.Dispose();
+            return smoothedPath;
 
             #endregion
         }
-        private NativeList<float2> FindHighLevelPathInGraph( NativeList<int> startNodes , int2 startPosition , int2 endPosition )
+        private NativeList<int2> FindHighLevelPathInGraph( NativeList<int> startNodes , int2 startPosition , int2 endPosition )
         {
             #region DATA SETUP
 
@@ -634,7 +646,7 @@ public class PathfindingSystem : ComponentSystem
             #endregion
             #region TRACE PATH
 
-            NativeList<float2> pathPositions = new NativeList<float2>( Allocator.Temp );
+            NativeList<int2> pathPositions = new NativeList<int2>( Allocator.Temp );
 
             if ( endEdgeIndex == -1 )
             {
@@ -646,10 +658,10 @@ public class PathfindingSystem : ComponentSystem
                 // Add the interNode position of the last edge to the path
                 int interNodeIndex = 
                     graphNodeInterIndexArray[ endEdgeIndex ];
-                float2 endOfPath = new float2(
+                /*float2 endOfPath = new float2(
                     graphNodePositions[ interNodeIndex ].x * graphCellSize ,
-                    graphNodePositions[ interNodeIndex ].y * graphCellSize );
-                pathPositions.Add( endOfPath );
+                    graphNodePositions[ interNodeIndex ].y * graphCellSize );*/
+                pathPositions.Add( graphNodePositions[ interNodeIndex ] );
 
                 // Trace the path
                 int edgeIndex = endEdgeIndex;
@@ -667,9 +679,7 @@ public class PathfindingSystem : ComponentSystem
                 // Add the internode of the first edge to the path
                 int interEdgeIndex = graphNodeToEdge[ graphNodeInterIndexArray[ edgeIndex ] ];
                 int lastIndex = graphNodeInterIndexArray[ interEdgeIndex ];
-                float2 startPos = new float2(
-                    graphNodePositions[ lastIndex ].x * graphCellSize ,
-                    graphNodePositions[ lastIndex ].y * graphCellSize );
+                int2 startPos = graphNodePositions[ lastIndex ];
                 pathPositions.Add( startPos );
 
                 // Return
@@ -753,6 +763,11 @@ public class PathfindingSystem : ComponentSystem
             }
 
             return walkable == 0;
+        }
+        private NativeList<int2> SmoothHighLevelPath( NativeList<int2> path )
+        {
+            NativeList<int2> smoothedPath = new NativeList<int2>( Allocator.Temp );
+            return smoothedPath;
         }
         private int ManhattenDistance( int2 positionA , int2 positionB )
         {
